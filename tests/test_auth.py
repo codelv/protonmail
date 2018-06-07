@@ -1,7 +1,14 @@
 """
-Tests based on a throw away ProtonMail account. 
+Copyright (c) 2018, Jairus Martin.
 
+Distributed under the terms of the BSD License.
+
+The full license is in the file LICENSE, distributed with this software.
+
+Tests based on a throw away ProtonMail account. 
 The account has been deleted.
+
+Created on May, 2018
 """
 
 import base64

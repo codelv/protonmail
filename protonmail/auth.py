@@ -1,8 +1,11 @@
 """
+Copyright (c) 2018, Jairus Martin.
 
-Ported from WebClient/src/app/authentication/services/srp.js
+Distributed under the terms of the BSD License.
 
+The full license is in the file LICENSE, distributed with this software.
 
+Created on May, 2018
 """
 import os
 import pgpy
@@ -268,5 +271,3 @@ def generate_proofs(key_size, modulus, hashed_password, server_ephemeral):
         'client_proof': client_proof,
         'server_proof': server_proof
     }
-
-

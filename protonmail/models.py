@@ -1,8 +1,14 @@
+"""
+Copyright (c) 2018, Jairus Martin.
+
+Distributed under the terms of the BSD License.
+
+The full license is in the file LICENSE, distributed with this software.
+
+Created on May, 2018
+"""
 import json
-from pprint import pprint
-from atom.api import (
-    Atom, Str, Int, Range, Bool, List, Instance, Property
-)
+from atom.api import Atom, Str, Int, Range, Bool, List, Instance
 
 
 class BInt(Range):
@@ -31,7 +37,6 @@ class Model(Atom):
         else:
             state = self.__getstate__()
         state.update(extra)
-        pprint(state)
         return json.dumps(state)
 
     @classmethod
@@ -39,18 +44,22 @@ class Model(Atom):
         state = data.copy()
         for k, v in data.items():
             m = getattr(cls, k)
-            if isinstance(k, Instance):
+            #print(k, m)
+            if isinstance(m, Instance):
                 mcls = m.validate_mode[-1]
                 if mcls is None:
                     raise ValueError("Can't reconstruct {}".format(k))
-                state[v] = mcls.from_json(**v)
-            elif isinstance(k, List):
+                #print("Converting", k, "to", mcls)
+                state[k] = None if v is None else mcls.from_json(**v)
+                #print("Converted!", k, "to", mcls)
+            elif isinstance(m, List):
                 # TODO: Recurse
                 mcls = m.validate_mode[-1].validate_mode[-1]
+                #print("List convertion", k, "to", mcls)
                 if mcls is None:
                     raise ValueError("Can't reconstruct {}".format(k))
                 state[k] = [mcls.from_json(**it) for it in v]
-                    
+
         return cls(**state)
 
 
@@ -59,26 +68,28 @@ class AutoResponder(Model):
     startTime = Int()
     endTime = Int()
     zone = Str()
-    daysSelected = List()
+    daysSelected = List(str)
     subject = Str()
     message = Str()
     isEnabled = Bool()
+    repeat = BInt()
 
     StartTime = Int()
     EndTime = Int()
     Subject = Str()
     Message = Str()
-    DaysSelected = List()
+    DaysSelected = List(str)
     IsEnabled = Bool()
+    Repeat = BInt()
     Zone = Str()
 
 
 class VPN(Model):
-    pass
-
-
-class Signature(Model):
-    pass
+    ExpirationTime = Int()
+    MaxConnect = Int()
+    MaxTier = Int()
+    PlanName = Str()
+    Status = BInt()
 
 
 class Activation(Model):
@@ -93,6 +104,7 @@ class Key(Model):
     Fingerprint = Str()
     Activation = Instance(Activation)
     Primary = BInt()
+    Flags = Int()
 
 
 class Address(Model):
@@ -105,7 +117,7 @@ class Address(Model):
     Type = Int()
     Order = Int()
     DisplayName = Str()
-    Signature = Instance(Signature)
+    Signature = Str()
     HasKeys = BInt()
     Keys = List(Key)
 
@@ -118,7 +130,7 @@ class Email(Model):
 
 
 class Phone(Model):
-    Value = Str()
+    Value = Instance(str) # Can be none apparently
     Status = BInt()
     Notify = BInt()
     Reset = BInt()
@@ -132,6 +144,7 @@ class UserSettings(Model):
     LogAuth = BInt()
     InvoiceText = Str()
     TwoFactor = BInt()
+    Phone = Instance(Phone)
 
 
 class MailSettings(Model):
@@ -142,6 +155,7 @@ class MailSettings(Model):
     AutoResponder = Instance(AutoResponder)
     AutoSaveContacts = BInt()
     AutoWildcardSearch = BInt()
+    Autocrypt = BInt()
     ComposerMode = Int()
     MessageButtons = BInt()
     ShowImages = BInt()
