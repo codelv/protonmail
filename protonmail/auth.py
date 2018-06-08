@@ -15,6 +15,12 @@ import binascii
 from bcrypt import _bcrypt
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import (
+    Cipher, algorithms, modes
+)
+from pgpy import PGPMessage, PGPKey
+from pgpy.constants import SymmetricKeyAlgorithm
+from pgpy.packet import PKESessionKeyV3
 
 
 def read_armored(message):
@@ -109,8 +115,8 @@ def check_mailbox_password(key, password, access_token):
         raise ValueError("Missing password")
     if not access_token:
         raise ValueError("Missing access token")
-    msg = pgpy.PGPMessage.from_blob(access_token)
-    pk, _ = pgpy.PGPKey.from_blob(key)
+    msg = PGPMessage.from_blob(access_token)
+    pk, _ = PGPKey.from_blob(key)
     with pk.unlock(password) as uk:
         return bytes(uk.decrypt(msg).message)
 
@@ -261,7 +267,7 @@ def generate_proofs(key_size, modulus, hashed_password, server_ephemeral):
         subtracted += p
 
     exponent = (to_bn(scrambling_param) * hpw +
-                to_bn(client_secret))%modulus_minus_one
+                to_bn(client_secret)) % modulus_minus_one
     shared_session = from_bn(pow(subtracted, exponent, p))
 
     client_proof = hash(client_ephemeral + server_ephemeral + shared_session)
@@ -271,3 +277,80 @@ def generate_proofs(key_size, modulus, hashed_password, server_ephemeral):
         'client_proof': client_proof,
         'server_proof': server_proof
     }
+
+
+def generate_session_key(cipher=SymmetricKeyAlgorithm.AES256):
+    """ Generate an AES256 session key for the given cipher 
+    
+    Parameters
+    ----------
+    cipher: pgpy.constants.SymmetricKeyAlgorithm
+        Cipher to use generate a key for
+       
+    Returns
+    -------
+    result: Bytes
+        Generated key
+        
+    """
+    return cipher.gen_key()
+
+
+def encrypt_session_key(session_key, key=None, password=None, 
+                        cipher=SymmetricKeyAlgorithm.AES256):
+    """ Encrypts a session key for sending with the message to other proton
+    mail clients.
+    
+    Parameters
+    ----------
+    session_key: Bytes
+        Session key for sending messages to multiple recipients.
+    key: pgpy.PGPKey
+        Recipient to encrypt the key for
+    password: String or Bytes
+        Password to encrypt the key with
+    cipher: pgpy.constants.SymmetricKeyAlgorithm
+        Cipher to use for encryption
+    
+    Returns
+    -------
+    result: Bytes
+        Encrypted session key data
+        
+    """
+    if key:
+        pkt = PKESessionKeyV3()
+        pkt.encrypter = bytearray(binascii.unhexlify(
+                            key.fingerprint.keyid.encode('latin-1')))
+        pkt.pkalg = key.key_algorithm
+        pkt.encrypt_sk(key._key, cipher, session_key)
+        return pkt.__bytes__()
+    else:
+        raise NotImplementedError
+    
+
+def decrypt_session_key(blob, key=None, password=None):
+    """ Decrypt the session key from the given PGPMessage blob
+    
+    Parameters
+    ----------
+    blob: String or Bytes
+        PGP Message data
+    key: pgpy.PGPKey
+        The private PGPKey for decryption. It MUST be unlocked.
+    password: String or Bytes
+        The password for decryption
+    
+    Returns
+    -------
+    result: Tuple[pgpy.constants.SymmetricKeyAlgorithm, Bytes]
+        The algo and session key
+    
+    """
+    message = PGPMessage.from_blob(blob)
+    for sk in message._sessionkeys:
+        k = key._children.get(sk.encrypter)
+        if k is not None:
+            cipher, session_key = sk.decrypt_sk(k._key)
+            return cipher, bytes(session_key)
+    raise KeyError("Key not found")

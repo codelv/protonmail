@@ -13,8 +13,8 @@ Created on May, 2018
 
 import base64
 from protonmail import auth
-
-
+from textwrap import dedent
+from pgpy import PGPKey
 # AUTH_INFO = {
 #     "Code": 1000,
 #     "Modulus": "\n-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nc5fkhlTPZsqb/ujEbCVdeUaCQUhDPeVgA5dN3q2jLoQcRrif5/LLp+BosQo4fiVVzZCnGHPGIvFsGf0n/bojbiizO+OfnnuHl+FYK0Qno83FJQ7GXebF4VghRHxEyuokdo4r9QozB9FBBm0M0vcElG0qyDG5p9HP+dXvd7OzcHChPmnJCweALSu7TfUQ4R1ADFVG909XxS9V4G3YEHRo1xGSyzK41YCCG3LYEhwM5I/ygcGLOxNFmGcq63afhVd7JAi2XD0YgzsPm5sM/aAVBd6RvWiKRV8vIDCOMlbax4ZitH4dABKXzO6Tdh9Je5fZcsuYlmN3wScUg6se7QYZsA==\n-----BEGIN PGP SIGNATURE-----\nVersion: OpenPGP.js v1.2.0\nComment: http://openpgpjs.org\n\n\n=twTO\n-----END PGP SIGNATURE-----\n",
@@ -149,3 +149,5 @@ def test_client_proofs():
     assert b64e(proofs['client_ephemeral']) == "XTaTsmCVqIns4E8dmMNOHpGIvh0j6zXD2cFtRKpNaFNV1zgRyo1CtxwcZO1l3sSk6FqhdBpDZrafSoF4mJIlYhrI4pIxvKiTTVWH50pPDRP6pCA64sHsUgKazHGnM09u29FocjqcewN6Oe+ZIm+A8TnssDmGI80XSy1nhbbPcQCn+VeTGR7g2f3l/7AbEMKnzWg3sZ2NAuNSYQaG2Kd211ZuLgEPQzWxPS+8ePACoWYnS3bzDDi8JXEKM6aXIqcY1+WG6Y1mks7k+bLyt62YfuFnjUzygzmXx6cuaw6UHmuHnfoiObDU5qwM+/RPpvvOCQ7pqB3ufvhgpAm+YiSVdg=="
     assert b64e(proofs['client_proof']) == "hd3KIdpaF1//ZFchpVDsq9FpW5/XyXALcWfQiZplAmsr704RbbEUb2fa4O+icpPNXgcZeMk63bN9DFQRykoGzjTooiMPobJWHF5JNrHwBhSKNJnCqTCqIrP5vddzMJCE17+C4ITi4QMJOOFcX3SWP0Capm7U18dSQfHDtaTVtdpr+i3zUd+gU4KykQUtjhZ8j/9JAw24bECaQl1gLPuyULpfFaSZc5wzdKdW3hznYX9rQBJAaFSvqRcN06HhsyDxaswTunUbVAlMrTVMl0+L2HPQpAGp2c0e5KGoYDYwDP3+k4Qs/igQIngEu535m6hPTyvL4qqgKxlqErWucjiOAw=="
     assert b64e(proofs['server_proof']) == "PE6/te1IEulNJPsxRxo+g1RI0czOighWhZSHGHE1kojwysj6n/HE1YSkzV9fkWpKFaxWlQbunoeX2rXqbCPnBiUIDWVWc0ps5tB1uRTOuG249mtX+nXPpwTbN85E7NxERv1MBhaluQQ9CZkfa/B90Sjba4i7K3Ln+pYZ24ZXZnqipHixdDees6XS2Y02ZKYDrlNEJiSDXNUVRGlGatHY5halLWMnKe5jLnLfWZuaAvtFg+FOBLk9tqMf+8cohubjavDFv113a8bn+Sqg2R5rx18b3l/tvUCtEKpb8jDNis5D/xCQpHjVwl7+NhMHIWz6Dp0Fi8Mf9RmQRYe3TECc/w=="
+
+

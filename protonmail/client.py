@@ -7,18 +7,30 @@ The full license is in the file LICENSE, distributed with this software.
 
 Created on May, 2018
 """
-import pgpy
 import treq
 import crochet
+import logging
+from pprint import pformat
 from cookielib import CookieJar
 from twisted.web import http
 from twisted.internet.defer import inlineCallbacks, returnValue
 from atom.api import Str, Int, Instance, ForwardInstance, List, Dict, Bool
 from base64 import b64decode as b64d
 from base64 import b64encode as b64e
-
-from protonmail.models import Model, BInt, User, UserSettings, MailSettings
+from pgpy import PGPMessage, PGPKey
+from pgpy.constants import SymmetricKeyAlgorithm
+from protonmail.models import (
+    Model, User, UserSettings, TwoFactorCode, Message, EmailAddress
+)
 from protonmail import auth
+from protonmail.responses import (
+    Response, AuthInfoResponse, AuthCookiesResponse, AuthResponse,
+    UsersPubKeyResponse, MessageResponse, UsersResponse, MessageSendResponse
+)
+
+
+log = logging.getLogger('protonmail')
+logging.basicConfig(level=logging.DEBUG)
 
 
 class LoginError(Exception):
@@ -37,79 +49,7 @@ class HttpError(Exception):
     pass
 
 
-class Response(Model):
-    Code = Int()
-
-
-class AuthInfoResponse(Response):
-    """ Expected response from api/auth/info """
-    Modulus = Str()
-    ServerEphemeral = Str()
-    Version = Int()
-    Salt = Str()
-    SRPSession = Str()
-    TwoFactor = BInt()
-
-
-class AuthResponse(Response):
-    """ Expected response from api/auth """
-    AccessToken = Str()
-    ExpiresIn = Int()
-    Scope = Str()
-    Uid = Str()
-    UID = Str()
-    RefreshToken = Str()
-    EventID = Str()
-    ServerProof = Str()
-    PasswordMode = Int()
-    PrivateKey = Str()
-    EncPrivateKey = Str()
-    KeySalt = Str()
-    TokenType = Str()
-
-
-class AuthCookiesResponse(Response):
-    """ Expected response from api/auth/cookies """
-    SessionToken = Str()
-    UID = Str()
-
-
-class UsersResponse(Response):
-    """ Expected response from api/users """
-    User = Instance(User)
-
-
-class SettingsResponse(Response):
-    """ Expected response from api/settings """
-    UserSettings = Instance(UserSettings)
-
-
-class MailResponse(Response):
-    """ Expected response from api/mail """
-    MailSettings = Instance(MailSettings)
-
-
-class MessageReadResult(Response):
-    ID = Str()
-
-
-class MessageReadResponse(Response):
-    """ Expected response from put api/read """
-    Responses = List(MessageReadResult)
-
-
-class UsersPubKeyResponse(Response):
-    """ Returns the code and the email of each user """
-    _keys = Dict(str, str)
-
-    def __init__(self, Code, **kwargs):
-        super(UsersPubKeyResponse, self).__init__(Code=Code, _keys=kwargs)
-
-    def __getattr__(self, item):
-        return self._keys[item]
-
-
-class TwoFactorCode(Model):
+class SecurityError(Exception):
     pass
 
 
@@ -123,8 +63,11 @@ class Client(Model):
     #: Use blocking API
     blocking = Bool()
 
+    #: Debug api calls
+    debug = Bool(True)
+
     def _default_api(self):
-        return API(client=self, blocking=self.blocking)
+        return API(client=self)
 
     # =========================================================================
     # Parameters for api/auth/info
@@ -187,6 +130,11 @@ class Client(Model):
     #: Code for api/auth
     TwoFactorCode = Instance(TwoFactorCode)
 
+    EventID = Str()
+
+    def _default_EventID(self):
+        return self.Auth and self.Auth.EventID
+
     # =========================================================================
     # Parameters for api/auth/cookies/
     # =========================================================================
@@ -213,17 +161,20 @@ class Client(Model):
     #: TODO: How to make this secure?
     SessionStorage = Dict()
 
+    #: The hashed mailbox password
+    MailboxPassword = Str()
+
     # =========================================================================
     # Results from api/users/
     # =========================================================================
-    #: Users returned
-    users = List(User)
+    #: User info
+    User = Instance(User)
 
     # =========================================================================
     # Results for api/settings/
     # =========================================================================
     #: Settings
-    settings = Instance(UserSettings)
+    Settings = Instance(UserSettings)
 
     # =========================================================================
     # Results for api/settings/
@@ -231,33 +182,371 @@ class Client(Model):
     #: Settings
     mail = Instance(UserSettings)
 
-    def read_pgp_message(self, message):
-        """ Read a PGP Message
-        
-        Parameters
-        ----------
-        message: String
-    
-        Returns
-        -------
-        result: PGPMessage
-        """
-        return pgpy.PGPMessage.from_blob(message)
+    #: Remote public keys
+    PublicKeys = Dict()
 
-    def read_pgp_key(self, message, key):
-        """ Read an encrypted PGP key
+    PrivateKey = Instance(PGPKey)
+
+    def _default_PrivateKey(self):
+        if not self.Auth:
+            return
+        key, _ = PGPKey.from_blob(self.Auth.EncPrivateKey)
+        return key
+
+    def _observe_Auth(self, change):
+        if self.Auth:
+            self.PrivateKey = self._default_PrivateKey()
+        else:
+            del self.PrivateKey
+
+    def get_public_keys(self, emails, timeout=None):
+        """ Get the public keys for the given list of emails
         
         Parameters
         ----------
-        message: String
-        key: String or Bytes
-    
+        emails: List or String
+            Emails to retrieve
+        timeout: Int or Float
+            Time to wait when blocking
+            
+        Returns
+        --------
+        result: Dict
+        """
+        if not self.blocking:
+            return self._get_public_keys(emails)
+        return crochet.run_in_reactor(
+            lambda: self._get_public_keys(emails))().wait(timeout)
+
+    @inlineCallbacks
+    def _get_public_keys(self, emails):
+        if not isinstance(emails, (tuple, list)):
+            emails = tuple(emails)
+
+        r = yield self.api.users.pubkeys(b64e(",".join(emails)),
+                                         blocking=False,
+                                         response=UsersPubKeyResponse)
+
+        self.PublicKeys.update({u: PGPKey.from_blob(k)[0] if k else ''
+                                for u, k in r.Keys.items()})
+        returnValue(r)
+
+    def get_user_info(self, timeout=None):
+        """ Get the info aboute this User
+        
+        Parameters
+        ----------
+        timeout: Int or Float
+            Time to wait when blocking
+            
+        Returns
+        --------
+        result: User
+        """
+        if not self.blocking:
+            return self._get_user_info()
+        return crochet.run_in_reactor(self._get_user_info)().wait(timeout)
+
+    @inlineCallbacks
+    def _get_user_info(self):
+        r = yield self.api.users(blocking=False, response=UsersResponse)
+        if r.Code == 1000:
+            self.User = r.User
+        returnValue(r)
+
+    def read_message(self, message, timeout=None):
+        """ Read and decrypt a Message if necessary
+       
+        Parameters
+        ----------
+        message: protonmail.message.Message or Dict
+   
         Returns
         -------
-        result: PGPKey
+        result: String
+            Decrypted message
         """
-        pgp_key = pgpy.PGPKey.from_blob(key)
-        pgp_key.unlock(key)
+        if not self.blocking:
+            return self._read_message(message)
+        return crochet.run_in_reactor(
+            lambda: self._read_message(message))().wait(timeout)
+
+    @inlineCallbacks
+    def _read_message(self, message):
+        if not isinstance(message, Message):
+            raise TypeError("expected a protonmail.models.Message instance")
+
+        # If the message hasn't been read yet, do that now
+        if not message.Body:
+            resp = yield self.api.messages(message.ID,
+                                           blocking=False,
+                                           response=MessageResponse)
+            if resp.Code != 1000:
+                raise ValueError("Unexpected response: {}".format(
+                                 resp.to_json()))
+            message = resp.Message
+
+        # Read and decrypt if needed
+        msg = PGPMessage.from_blob(message.Body)
+        if msg.is_signed:
+            email = message.SenderAddress
+            if email not in self.PublicKeys:
+                yield self._get_public_keys([email])
+            pk = self.PublicKeys.get(email)
+            if not pk:
+                raise SecurityError("Failed to verify signed message!")
+            pk.verify(msg)
+
+        # Decrypt
+        with self.PrivateKey.unlock(self.MailboxPassword) as key:
+            message.decrypt(key)
+        returnValue(message)
+
+    def create_draft(self, timeout=None):
+        """ Create a message as a draft. This will populate an ID for 
+        the message.
+ 
+        Parameters
+        ----------
+        timeout: Int or Float
+            Timeout to wait when blocking
+         
+        Returns
+        -------
+        result: protonmail.responses.MessageResponse
+        """
+        if not self.blocking:
+            return self._create_draft()
+        return crochet.run_in_reactor(self._create_draft)().wait(timeout)
+
+    @inlineCallbacks
+    def _create_draft(self):
+        user = self.User
+        if not user:
+            r = yield self._get_user_info()
+            user = r.User
+        address = user.Addresses[0]
+        message = Message(
+            AddressID=address.ID,
+            IsRead=1,
+            MIMEType='text/html',
+            Sender=EmailAddress(Name=address.DisplayName,
+                                Address=address.Email)
+        )
+        message.encrypt(self.PrivateKey.pubkey)
+
+        r = yield self.api.messages.draft(
+            method='POST', blocking=False, response=MessageResponse,
+            json={
+                'AttachmentKeyPackets': [],
+                'id': None,
+                'Message': message.to_json(
+                    'AddressID', 'Sender', 'IsRead', 'CCList', 'BCCList',
+                    'MIMEType', 'Subject', 'Body', 'ToList',
+            )
+        })
+        if r.Message:
+            r.Message.Client = self
+        returnValue(r)
+
+    def save_draft(self, message, timeout=None):
+        """ Encrypt (if necessary) and save the message as a draft.
+
+        Parameters
+        ----------
+        message: protonmail.models.Message
+        
+        Returns
+        -------
+        result: protonmail.responses.MessageResponse
+        """
+        if not self.blocking:
+            return self._save_draft(message)
+        return crochet.run_in_reactor(
+            lambda: self._save_draft(message))().wait(timeout)
+
+    @inlineCallbacks
+    def _save_draft(self, message):
+        if not isinstance(message, Message):
+            raise TypeError("expected a protonmail.models.Message instance")
+        if not message.ID:
+            raise ValueError("Cannot save a draft without an ID. "
+                             "Use create_draft first.")
+
+        # Encrypt for this client only
+        message.encrypt(self.PrivateKey.pubkey)
+
+        # Should never happen
+        if not message.is_encrypted():
+            raise SecurityError("Failed to encrypted draft")
+
+        r = yield self.api.messages.draft(
+            message.ID, method='PUT', blocking=False, response=MessageResponse,
+            json={
+                'AttachmentKeyPackes': {},
+                'id': message.ID,
+                'Message': message.to_json('AddressID', 'Sender', 'IsRead',
+                    'CCList', 'BCCList', 'MIMEType', 'Subject', 'Body',
+                    'ToList',
+                )
+        })
+        if r.Message:
+            r.Message.Client = self
+        returnValue(r)
+
+    def send_message(self, message, timeout=None):
+        """ Encrypt and send the message.
+        
+        Parameters
+        ----------
+        message: protonmail.models.Message
+        
+        Returns
+        -------
+        result: protonmail.responses.MessageResponse
+        """
+        if not self.blocking:
+            return self._send_message(message)
+        return crochet.run_in_reactor(
+            lambda: self._send_message(message))().wait(timeout)
+
+    @inlineCallbacks
+    def _send_message(self, message):
+        if not isinstance(message, Message):
+            raise TypeError("expected a protonmail.models.Message instance")
+        if not message.ToList:
+            raise ValueError("message missing email to addresses")
+        
+        # Read draft from server if needed
+        if message.ID and not message.Body:
+            r = yield self.api.messages(message.ID, blocking=False,
+                                        response=MessageResponse())
+            message = r.Message
+        
+        # Decrypt
+        if message.Body and not message.DecryptedBody:
+            yield self._read_message(message)
+            
+        # Get any missing keys
+        keys = self.PublicKeys
+        emails = list(set([to.Address for to in (
+                           message.ToList + message.CCList + message.BCCList)]))
+        keys_needed = [e for e in emails if e not in keys]
+        if keys_needed:
+            yield self._get_public_keys(keys_needed)
+            keys = self.PublicKeys
+        
+        # Extract the session key
+        #cipher = SymmetricKeyAlgorithm.AES256
+        #session_key = auth.generate_session_key(cipher)
+        with self.PrivateKey.unlock(self.MailboxPassword) as uk:
+            cipher, session_key = auth.decrypt_session_key(message.Body,
+                                                           key=uk)
+        
+        pkg = {
+            'Addresses': {},
+            'Body': "",
+            'MIMEType': message.MIMEType or "text/html",
+            'Type': 0,
+        }
+        
+        # If we need to send the key in clear
+        cleartext = False
+        for to in message.ToList:
+            pk = keys.get(to.Address)
+            if pk is None:
+                raise SecurityError("Failed to get public key for: "
+                                    "{}".format(to.Address))
+            
+            if pk:
+                # Inside user
+                # I guess the server does this? Encrypt body for email's pubkey 
+                #pkg['Body'] = pk.encrypt(pkg['Body'], cipher=cipher,
+                #                         sessionkey=session_key)
+                
+                # Encrypt the session key for this user
+                sk = auth.encrypt_session_key(session_key, key=pk,
+                                              cipher=cipher)
+                
+                pkg['Addresses'][to.Address] = {
+                    'AttachmentKeyPackets': {},
+                    'BodyKeyPacket': b64e(sk),
+                    'Signature': 0,
+                    'Type': Message.SEND_PM
+                }
+                pkg['Type'] |= Message.SEND_PM
+            elif False and message.IsEncrypted:  # Disabled for now
+                # Enc outside user
+                token = message.generate_reply_token(cipher)
+                enc_token = PGPMessage.new(
+                    b64d(token)).encrypt(message.Password).message.__bytes__()
+                
+                pkg['Addresses'][to.Address] = {
+                    'Auth': 0,
+                    'PasswordHint': message.PasswordHint,
+                    'Type': Message.SEND_EO,
+                    'Token': token,
+                    'EncToken': b64e(enc_token),
+                    'AttachmentKeyPackets': {},
+                    'BodyKeyPacket': b64e(session_key),
+                    'Signature': int(pkg['Body'].is_signed),
+                }
+            else:
+                cleartext = True
+                
+                # Outside user
+                pkg['Addresses'][to.Address] = {
+                    'Signature': 0,
+                    'Type': Message.SEND_CLEAR
+                }
+                pkg['Type'] |= Message.SEND_CLEAR
+                
+        if cleartext and message.ExpirationTime and not message.Password:
+            raise SecurityError("Expiring emails to non-ProtonMail recipients" \
+                                "require a message password to be set")
+        
+        # Sending to a non PM user screws all security
+        if cleartext:
+            pkg['BodyKey'] = b64e(session_key)
+            pkg['AttachmentKeys'] = {}  # TODO
+        
+        # Get the message
+        msg = PGPMessage.new(message.DecryptedBody)
+        
+        # Sign it
+        with self.PrivateKey.unlock(self.MailboxPassword) as uk:
+            msg |= uk.sign(msg)
+        
+        # Encrypt it using the session key and encode it
+        msg = self.PrivateKey.pubkey.encrypt(msg, cipher=cipher,
+                                             sessionkey=session_key)
+        # Now encode it
+        pkg['Body'] = b64e(msg.message.__bytes__())
+    
+        r = yield self.api.messages.send(
+            message.ID, method='POST', blocking=False,
+            response=MessageSendResponse,
+            json={
+                'ExpirationTime': 0,
+                'id': message.ID,
+                'Packages': [pkg]
+            }
+
+        )
+        returnValue(r)
+
+    def check_events(self, timeout=None):
+        """ Check for updates"""
+        if not self.blocking:
+            return self._check_events()
+        return crochet.run_in_reactor(self._check_events)().wait(timeout)
+
+    @inlineCallbacks
+    def _check_events(self):
+        eid = id or self.EventID
+        data = yield self.api.events(eid, blocking=False)
+        self.EventID = data['EventID']
+        returnValue(data)
 
 
 class API(Model):
@@ -267,9 +556,6 @@ class API(Model):
 
     #: Default headers
     headers = Dict()
-
-    #: Async or sync
-    blocking = Bool()
 
     #: Host for requests
     host = Str("https://mail.protonmail.com/")
@@ -282,7 +568,6 @@ class API(Model):
         return {
             'Accept': '*/*',
             'Connection': 'keep-alive',
-            'Content-Type': "application/json;charset=utf-8",
             'Host': 'mail.protonmail.com',
             'Origin': self.host,
             'Referer': self.host,
@@ -295,7 +580,7 @@ class API(Model):
 
     def login(self, password, unlock=True, timeout=None):
         """ Login and unlock Protonmail """
-        if not self.blocking:
+        if not self.client.blocking:
             return self._login(password, unlock)
         crochet.setup()
         return crochet.run_in_reactor(
@@ -314,7 +599,7 @@ class API(Model):
         # Get the auth info
         r = yield treq.post(
             host+"api/auth/info",
-            client.to_json('Username', 'ClientID', 'ClientSecret'),
+            json=client.to_json('Username', 'ClientID', 'ClientSecret'),
             headers=headers
         )
 
@@ -342,7 +627,7 @@ class API(Model):
         # Authenticate
         r = yield treq.post(
             host+"api/auth",
-            client.to_json(
+            json=client.to_json(
                 'Username', 'ClientID', 'ClientSecret', 'TwoFactorCode',
                 SRPSession=client.AuthInfo.SRPSession,
                 ClientProof=b64e(client.ClientProof),
@@ -371,7 +656,7 @@ class API(Model):
 
     def unlock(self, password, timeout=None):
         """ Unlock to Protonmail """
-        if not self.blocking:
+        if not self.client.blocking:
             return self._unlock(password)
         return crochet.run_in_reactor(
             lambda: self._unlock(password))().wait(timeout)
@@ -385,6 +670,7 @@ class API(Model):
         # Compute access key
         pwd = auth.compute_key_password(password,
                                         b64d(client.Auth.KeySalt))
+
         # Decode the access token
         token = auth.check_mailbox_password(client.Auth.EncPrivateKey,
                                             pwd, client.Auth.AccessToken)
@@ -399,7 +685,7 @@ class API(Model):
         # Get the cookies
         r = yield treq.post(
             host + "api/auth/cookies",
-            client.to_json(
+            json=client.to_json(
                 'ResponseType', 'ClientID', 'GrantType', 'RedirectURI',
                 'State', Uid=client.Auth.Uid,
                 RefreshToken=client.Auth.RefreshToken
@@ -413,6 +699,9 @@ class API(Model):
 
         data = yield r.json()
 
+        # Save the hashed mailbox password
+        client.MailboxPassword = pwd
+
         result = client.AuthCookies = AuthCookiesResponse.from_json(**data)
         if result.Code == 1000:
             client.Cookies = r.cookies()
@@ -420,149 +709,115 @@ class API(Model):
 
     def logout(self, timeout=None):
         """ Logout of Protonmail """
-        if not self.blocking:
+        if not self.client.blocking:
             return self._logout()
         return crochet.run_in_reactor(self._logout)().wait(timeout)
 
     @inlineCallbacks
     def _logout(self):
         client = self.client
-        data = self._request("api/auth", method='DELETE')
+        data = yield self.request("api/auth", method='DELETE', blocking=False)
         result = Response.from_json(**data)
         if result.Code != 1000:
             raise LoginError("Unexpected logout code: {}".format(result.Code))
         del client.AuthInfo
         del client.Auth
         del client.AuthCookies
+        del client.MailboxPassword
         returnValue(data)
 
-    def events(self, id=None, timeout=None):
-        if not self.blocking:
-            return self._events(id)
-        return crochet.run_in_reactor(
-            lambda: self._events(id))().wait(timeout)
-
-    @inlineCallbacks
-    def _events(self, id=None):
-        eid = id or self.client.Auth.EventID
-        data = yield self._request('api/events/'+eid)
-        returnValue(data)
-
-    # def users(self, timeout=None):
-    #     if not self.blocking:
-    #         return self._users()
-    #     return crochet.run_in_reactor(self._users)().wait(timeout)
-    #
-    # @inlineCallbacks
-    # def _users(self):
-    #     data = yield self._request('https://mail.protonmail.com/api/users')
-    #     response = UsersResponse.from_json(**data)
-    #     if response.Code == 1000:
-    #         self.client.users = [response.User]
-    #     returnValue(response)
-    #
-    # def settings(self, timeout=None):
-    #     if not self.blocking:
-    #         return self._settings()
-    #     return crochet.run_in_reactor(self._settings)().wait(timeout)
-    #
-    # @inlineCallbacks
-    # def _settings(self):
-    #     data = yield self._request('https://mail.protonmail.com/api/settings')
-    #     response = SettingsResponse.from_json(**data)
-    #     if response.Code == 1000:
-    #         self.client.settings = response.UserSettings
-    #     returnValue(response)
-    #
-    # def mail(self, timeout=None):
-    #     if not self.blocking:
-    #         return self._mail()
-    #     return crochet.run_in_reactor(self._mail)().wait(timeout)
-    #
-    # @inlineCallbacks
-    # def _mail(self):
-    #     data = yield self._request('https://mail.protonmail.com/api/mail')
-    #     returnValue(MailResponse.from_json(**data))
-    #
-    # def read(self, ids, timeout=None):
-    #     """ Mark the given message ids as read. """
-    #     if not self.blocking:
-    #         return self._read(ids)
-    #     return crochet.run_in_reactor(
-    #         lambda: self._read(ids))().wait(timeout)
-    #
-    # @inlineCallbacks
-    # def _read(self, ids):
-    #     data = yield self._request(
-    #         'https://mail.protonmail.com/api/read',
-    #         body={'IDs': ids},
-    #         method='put')
-    #     returnValue(MessageReadResponse.from_json(**data))
-    #
-    # def pubkeys(self, key, timeout=None):
-    #     """ Mark the given message ids as read. """
-    #     if not self.blocking:
-    #         return self._pubkeys(ids)
-    #     return crochet.run_in_reactor(
-    #         lambda: self._read(ids))().wait(timeout)
-    #
-    # @inlineCallbacks
-    # def _read(self, ids):
-    #     data = yield self._request(
-    #         'https://mail.protonmail.com/api/message/read',
-    #         body={'IDs': ids},
-    #         method='put')
-    #     returnValue(MessageReadResponse.from_json(**data))
-
-    def request(self, path, body=None, method='GET', cookies=None, headers=None,
-                timeout=None):
-        """ Return json for the request 
+    def request(self, path, body=None, method='GET', cookies=None,
+                headers=None, response=None, timeout=None, blocking=None,
+                **kwargs):
+        """ Perform the request automatically sending the authentication
+        cookies and expected headers.
         
+        Parameters
+        ----------
+        path: String
+            The path to request
+        body: String, List, or Dict
+            The body of the request
+        method: String
+            Request method
+        cookies: CookieJar
+            Request cookies
+        headers: Dict
+            Request headers
+        response: protonmail.responses.Response
+            Expected response to parse from the request
+        blocking: Bool
+            Override default blocking
+        timeout: Number
+            Timeout to use when blocking
+        kwargs: Object
+            Extra kwarts to pass to treq (ex json)
         """
-        if not self.blocking:
-            return self._request(path, body, method, cookies, headers)
-        request = lambda: self._request(path, body, method, cookies, headers)
-        return crochet.run_in_reactor(request)().wait(timeout)
+        blocking = blocking if blocking is not None else self.client.blocking
+
+        def request():
+            return self._request(path, body, method, cookies, headers,
+                                 response, **kwargs)
+        if blocking:
+            return crochet.run_in_reactor(request)().wait(timeout)
+        return request()
 
     @inlineCallbacks
     def _request(self, path, body=None, method='GET', cookies=None,
-                 headers=None):
+                 headers=None, response=None, **kwargs):
         client = self.client
 
         if not client.Auth:
             raise LoginError("Must login first!")
         if not client.AuthCookies:
             raise AuthError("Must unlock the keys first!")
+        if response is not None and not issubclass(response, Response):
+            raise ValueError("response must be a subclass Response. "
+                             "Got {}".format(response))
         h = self.headers.copy()
         h.update({'x-pm-uid': client.Auth.Uid})
+
+        url = self.host+path.lstrip("/")
+        if client.debug:
+            log.warning("Request: method={}, url={}, body={}, cookies={}, "
+                        "headers={} kwargs={}".format(
+                            method, url, body, cookies, headers, 
+                            pformat(kwargs)))
         r = yield treq.request(method,
-                               self.host+path.lstrip("/"),
+                               url,
                                body=body,
                                cookies=cookies or client.Cookies,
-                               headers=headers or h)
+                               headers=headers or h,
+                               **kwargs)
         #if r.code != http.OK:
         #    raise HttpError("Unexpected HTTP response: {}".format(r.code))
-
         data = yield r.json()
+        if client.debug:
+            log.warning("Response: {} - {}".format(r, pformat(data)))
+        if response is not None:
+            returnValue(response.from_json(**data))
         returnValue(data)
 
     def __getattr__(self, item):
         """ Return an alias so you can do requests using the dot notation.
          
         """
-        return API(client=self.client, blocking=self.blocking,
-                   path=self.path+[item])
+        return API(client=self.client, path=self.path+[item])
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, path="", **kwargs):
         """ Invoke request when using the dot notation. 
         
         Examples
         --------
-        client.api.messages.count()
-        # is the same as
-        client.request('api/messages/count')
+        # Same as client.request('api/messages/count')
+        - client.api.messages.count()
+        
+        # Same as client.request('api/conversations/convo-id-string...==')
+        - client.api.conversations('convo-id-string...==')
+        
         """
-        return self.request("/".join(self.path), *args, **kwargs)
+        parts = (self.path + [path]) if path else self.path
+        return self.request("/".join(parts), **kwargs)
 
     def __repr__(self):
         cls = self.__class__
