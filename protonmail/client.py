@@ -648,11 +648,11 @@ class API(Model):
 
         # Login success
         if not unlock:
-            returnValue(data)
+            returnValue(resp)
 
         # And unlock
         unlocked = yield self._unlock(password)
-        returnValue((data, unlocked))
+        returnValue((resp, unlocked))
 
     def unlock(self, password, timeout=None):
         """ Unlock to Protonmail """
@@ -705,7 +705,7 @@ class API(Model):
         result = client.AuthCookies = AuthCookiesResponse.from_json(**data)
         if result.Code == 1000:
             client.Cookies = r.cookies()
-        returnValue(data)
+        returnValue(result)
 
     def logout(self, timeout=None):
         """ Logout of Protonmail """
@@ -724,7 +724,7 @@ class API(Model):
         del client.Auth
         del client.AuthCookies
         del client.MailboxPassword
-        returnValue(data)
+        returnValue(result)
 
     def request(self, path, body=None, method='GET', cookies=None,
                 headers=None, response=None, timeout=None, blocking=None,
