@@ -1,9 +1,12 @@
 # Protonmail
 
-An unoffical protonmail client for python using pgpy, bcrypt, and atom. 
+An _unoffical_ protonmail client for python using pgpy, bcrypt, and atom. 
 
 It can be used sync or async and currently supports twisted and tornado for
 python 2.7 and up.
+
+Currently supports reading and sending messages to protonmail users and outside
+users. Sending and receving attachments are not yet supported.
 
 
 ## Usage
@@ -17,8 +20,9 @@ from protonmail.client import Client
 # Login
 client = Client(username="someuser", 
                 blocking=True)  # It's async by default
-client.api.login(getpass())
 
+# If using different keys for login and mailbox you must unlock separately                
+client.api.login(getpass())
 
 ```
 
@@ -89,8 +93,8 @@ draft = r.Message
 draft.Subject = "Hello from python!"
 draft.DecryptedBody = "JS got you down huh?"
 draft.ToList = [
-    EmailAddress(Address="user@example.com", Name="User"), # Non PM will be cleartext
-    EmailAddress(Address="user@protonmail.com"), # PM will be ency
+    EmailAddress(Address="user@example.com", Name="User"), 
+    EmailAddress(Address="user@protonmail.com"), 
 ]
 
 # Save the draft if needed
@@ -116,5 +120,7 @@ c.api.logout()
 ### Comments
 
 This was written based on the web client. Please audit the code and report bugs.
+
+Feel free to buy me a coffee to [say thanks](https://www.codelv.com/donate/).
 
 Thank you!
