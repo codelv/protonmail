@@ -20,6 +20,7 @@ setup(
     license="BSD",
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
-    install_requires=['treq', 'pgpy', 'bcrypt', 'atom', 'crochet'],
+    install_requires=['pgpy', 'bcrypt', 'atom'],
+    #also needs either ['treq', 'crochet'], or ['tornado'] or ['aiohttp']
     packages=find_packages(),
 )

@@ -7,30 +7,36 @@ The full license is in the file LICENSE, distributed with this software.
 
 Created on May, 2018
 """
-import treq
-import crochet
+import sys
 import logging
 from pprint import pformat
-from cookielib import CookieJar
-from twisted.web import http
-from twisted.internet.defer import inlineCallbacks, returnValue
-from atom.api import Str, Int, Instance, ForwardInstance, List, Dict, Bool
+from atom.api import Str, Bytes, Int, Instance, ForwardInstance, List, Dict, Bool
 from base64 import b64decode as b64d
 from base64 import b64encode as b64e
 from pgpy import PGPMessage, PGPKey
 from pgpy.constants import SymmetricKeyAlgorithm
+from protonmail.clients.api import coroutine, return_value, run_sync, requests
 from protonmail.models import (
     Model, User, UserSettings, TwoFactorCode, Message, EmailAddress
 )
-from protonmail import auth
+from protonmail import auth, utils
 from protonmail.responses import (
     Response, AuthInfoResponse, AuthCookiesResponse, AuthResponse,
     UsersPubKeyResponse, MessageResponse, UsersResponse, MessageSendResponse
 )
 
 
+if utils.IS_PY3:
+    from http.cookiejar import CookieJar
+    from http.cookies import SimpleCookie
+else:
+    from cookielib import CookieJar
+    from Cookie import SimpleCookie
+    
+
 log = logging.getLogger('protonmail')
 logging.basicConfig(level=logging.DEBUG)
+
 
 
 class LoginError(Exception):
@@ -65,6 +71,10 @@ class Client(Model):
 
     #: Debug api calls
     debug = Bool(True)
+    
+    #: Is logged in
+    is_logged_in = Bool()
+    
 
     def _default_api(self):
         return API(client=self)
@@ -91,13 +101,13 @@ class Client(Model):
     # Parameters for api/auth/
     # =========================================================================
     #: Computed client ephemeral, set in _default_ClientProof
-    ClientEphemeral = Str()
+    ClientEphemeral = Bytes()
 
     #: Default key size
     KeySize = Int(2048)
 
     #: Get the hashed password
-    HashedPassword = Str()
+    HashedPassword = Bytes()
 
     def _observe_HashedPassword(self, change):
         # Recalculate the proof when the HashedPassword changes
@@ -119,10 +129,10 @@ class Client(Model):
         return proofs['client_proof']
 
     #: Client proof
-    ClientProof = Str()
+    ClientProof = Bytes()
 
     #: Expected server proof
-    ExpectedServerProof = Str()
+    ExpectedServerProof = Bytes()
 
     #: Auth response from login
     Auth = Instance(AuthResponse)
@@ -156,7 +166,7 @@ class Client(Model):
     AuthCookies = Instance(AuthCookiesResponse)
 
     #: Cookies set
-    Cookies = Instance(CookieJar)
+    Cookies = Instance((CookieJar, SimpleCookie))
 
     #: TODO: How to make this secure?
     SessionStorage = Dict()
@@ -184,7 +194,8 @@ class Client(Model):
 
     #: Remote public keys
     PublicKeys = Dict()
-
+    
+    #: Encrypted private key
     PrivateKey = Instance(PGPKey)
 
     def _default_PrivateKey(self):
@@ -196,8 +207,10 @@ class Client(Model):
     def _observe_Auth(self, change):
         if self.Auth:
             self.PrivateKey = self._default_PrivateKey()
+            self.is_logged_in = True
         else:
             del self.PrivateKey
+            self.is_logged_in = False
 
     def get_public_keys(self, emails, timeout=None):
         """ Get the public keys for the given list of emails
@@ -215,21 +228,23 @@ class Client(Model):
         """
         if not self.blocking:
             return self._get_public_keys(emails)
-        return crochet.run_in_reactor(
-            lambda: self._get_public_keys(emails))().wait(timeout)
+        return run_sync(self._get_public_keys, emails, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _get_public_keys(self, emails):
-        if not isinstance(emails, (tuple, list)):
-            emails = tuple(emails)
-
-        r = yield self.api.users.pubkeys(b64e(",".join(emails)),
+        if isinstance(emails, (tuple, list)):
+            emails = utils.join(",", emails)
+        else:
+            emails = utils.str(emails)
+        if utils.IS_PY3:
+            emails = emails.encode()
+        r = yield self.api.users.pubkeys(b64e(emails),
                                          blocking=False,
                                          response=UsersPubKeyResponse)
 
         self.PublicKeys.update({u: PGPKey.from_blob(k)[0] if k else ''
                                 for u, k in r.Keys.items()})
-        returnValue(r)
+        return_value(r)
 
     def get_user_info(self, timeout=None):
         """ Get the info aboute this User
@@ -245,14 +260,14 @@ class Client(Model):
         """
         if not self.blocking:
             return self._get_user_info()
-        return crochet.run_in_reactor(self._get_user_info)().wait(timeout)
+        return run_sync(self._get_user_info, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _get_user_info(self):
         r = yield self.api.users(blocking=False, response=UsersResponse)
         if r.Code == 1000:
             self.User = r.User
-        returnValue(r)
+        return_value(r)
 
     def read_message(self, message, timeout=None):
         """ Read and decrypt a Message if necessary
@@ -268,10 +283,9 @@ class Client(Model):
         """
         if not self.blocking:
             return self._read_message(message)
-        return crochet.run_in_reactor(
-            lambda: self._read_message(message))().wait(timeout)
+        return run_sync(self._read_message, message, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _read_message(self, message):
         if not isinstance(message, Message):
             raise TypeError("expected a protonmail.models.Message instance")
@@ -300,7 +314,7 @@ class Client(Model):
         # Decrypt
         with self.PrivateKey.unlock(self.MailboxPassword) as key:
             message.decrypt(key)
-        returnValue(message)
+        return_value(message)
 
     def create_draft(self, timeout=None):
         """ Create a message as a draft. This will populate an ID for 
@@ -317,9 +331,9 @@ class Client(Model):
         """
         if not self.blocking:
             return self._create_draft()
-        return crochet.run_in_reactor(self._create_draft)().wait(timeout)
+        return run_sync(self._create_draft, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _create_draft(self):
         user = self.User
         if not user:
@@ -347,7 +361,7 @@ class Client(Model):
         })
         if r.Message:
             r.Message.Client = self
-        returnValue(r)
+        return_value(r)
 
     def save_draft(self, message, timeout=None):
         """ Encrypt (if necessary) and save the message as a draft.
@@ -362,10 +376,9 @@ class Client(Model):
         """
         if not self.blocking:
             return self._save_draft(message)
-        return crochet.run_in_reactor(
-            lambda: self._save_draft(message))().wait(timeout)
+        return run_sync(self._save_draft, message, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _save_draft(self, message):
         if not isinstance(message, Message):
             raise TypeError("expected a protonmail.models.Message instance")
@@ -383,7 +396,7 @@ class Client(Model):
         r = yield self.api.messages.draft(
             message.ID, method='PUT', blocking=False, response=MessageResponse,
             json={
-                'AttachmentKeyPackes': {},
+                'AttachmentKeyPackets': {},
                 'id': message.ID,
                 'Message': message.to_json('AddressID', 'Sender', 'IsRead',
                     'CCList', 'BCCList', 'MIMEType', 'Subject', 'Body',
@@ -392,7 +405,7 @@ class Client(Model):
         })
         if r.Message:
             r.Message.Client = self
-        returnValue(r)
+        return_value(r)
 
     def send_message(self, message, timeout=None):
         """ Encrypt and send the message.
@@ -407,10 +420,9 @@ class Client(Model):
         """
         if not self.blocking:
             return self._send_message(message)
-        return crochet.run_in_reactor(
-            lambda: self._send_message(message))().wait(timeout)
+        return run_sync(self._send_message, message, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _send_message(self, message):
         if not isinstance(message, Message):
             raise TypeError("expected a protonmail.models.Message instance")
@@ -470,7 +482,7 @@ class Client(Model):
                 
                 pkg['Addresses'][to.Address] = {
                     'AttachmentKeyPackets': {},
-                    'BodyKeyPacket': b64e(sk),
+                    'BodyKeyPacket': utils.str(b64e(sk)),
                     'Signature': 0,
                     'Type': Message.SEND_PM
                 }
@@ -486,9 +498,9 @@ class Client(Model):
                     'PasswordHint': message.PasswordHint,
                     'Type': Message.SEND_EO,
                     'Token': token,
-                    'EncToken': b64e(enc_token),
+                    'EncToken': utils.str(b64e(enc_token)),
                     'AttachmentKeyPackets': {},
-                    'BodyKeyPacket': b64e(session_key),
+                    'BodyKeyPacket': utils.str(b64e(session_key)),
                     'Signature': int(pkg['Body'].is_signed),
                 }
             else:
@@ -507,7 +519,7 @@ class Client(Model):
         
         # Sending to a non PM user screws all security
         if cleartext:
-            pkg['BodyKey'] = b64e(session_key)
+            pkg['BodyKey'] = utils.str(b64e(session_key))
             pkg['AttachmentKeys'] = {}  # TODO
         
         # Get the message
@@ -521,7 +533,7 @@ class Client(Model):
         msg = self.PrivateKey.pubkey.encrypt(msg, cipher=cipher,
                                              sessionkey=session_key)
         # Now encode it
-        pkg['Body'] = b64e(msg.message.__bytes__())
+        pkg['Body'] = utils.str(b64e(msg.message.__bytes__()))
     
         r = yield self.api.messages.send(
             message.ID, method='POST', blocking=False,
@@ -533,21 +545,53 @@ class Client(Model):
             }
 
         )
-        returnValue(r)
+        return_value(r)
 
     def check_events(self, timeout=None):
         """ Check for updates"""
         if not self.blocking:
             return self._check_events()
-        return crochet.run_in_reactor(self._check_events)().wait(timeout)
+        return run_sync(self._check_events, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _check_events(self):
         eid = id or self.EventID
         data = yield self.api.events(eid, blocking=False)
         self.EventID = data['EventID']
-        returnValue(data)
-
+        return_value(data)
+        
+    def send_simple(self, **kwargs):
+        """ Simple API for sending email """
+        if not self.blocking:
+            return self._send_simple(**kwargs)
+        return run_sync(self._send_simple, **kwargs)
+    
+    @coroutine
+    def _send_simple(self, to, subject="", body="", cc=None, bcc=None):
+        if not to:
+            raise ValueError("Please enter one or more recipient email "
+                             "addresses")
+        r = yield self._create_draft()
+        if r.Code != 1000:
+            raise ValueError("Failed to create draft: {}".format(r.to_json()))
+        m = r.Message
+        m.Subject = subject
+        m.DecryptedBody = body
+        if not isinstance(to, (tuple, list)):
+            to = [to]
+        m.ToList = [EmailAddress(Address=addr) for addr in to]
+        if cc is not None:
+            m.CCList = [EmailAddress(Address=addr) for addr in cc]
+        if bcc is not None:
+            m.BCCList = [EmailAddress(Address=addr) for addr in bcc]
+        r = yield self._save_draft(m)
+        if r.Code != 1000:
+            raise ValueError("Failed to save draft: {}".format(r.to_json()))
+        r = yield self._send_message(m)
+        if r.Code != 1000:
+            raise ValueError("Failed to send message: {}".format(r.to_json()))
+        return_value(r)
+       
 
 class API(Model):
     """ Wrapper for the get API """
@@ -582,11 +626,9 @@ class API(Model):
         """ Login and unlock Protonmail """
         if not self.client.blocking:
             return self._login(password, unlock)
-        crochet.setup()
-        return crochet.run_in_reactor(
-            lambda: self._login(password, unlock))().wait(timeout)
+        return run_sync(self._login, password, unlock, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _login(self, password, unlock=True):
         client = self.client
         host = self.host
@@ -597,13 +639,13 @@ class API(Model):
         })
 
         # Get the auth info
-        r = yield treq.post(
-            host+"api/auth/info",
+        r = yield requests.post(
+            url=host+"api/auth/info",
             json=client.to_json('Username', 'ClientID', 'ClientSecret'),
             headers=headers
         )
 
-        if r.code != http.OK:
+        if r.code != 200:
             raise LoginError("Unexpected info response: {}".format(r.code))
         data = yield r.json()
 
@@ -625,8 +667,8 @@ class API(Model):
         })
 
         # Authenticate
-        r = yield treq.post(
-            host+"api/auth",
+        r = yield requests.post(
+            url=host+"api/auth",
             json=client.to_json(
                 'Username', 'ClientID', 'ClientSecret', 'TwoFactorCode',
                 SRPSession=client.AuthInfo.SRPSession,
@@ -635,33 +677,34 @@ class API(Model):
             ),
             headers=headers
         )
-        if r.code != http.OK:
+        if r.code != 200:
             raise LoginError("Unexpected auth response: {}".format(r.code))
 
         data = yield r.json()
 
         resp = client.Auth = AuthResponse.from_json(**data)
         if resp.Code != 1000:
+            del client.Auth
             raise LoginError("Unexpected auth code: {}".format(resp.Code))
         if b64d(resp.ServerProof) != client.ExpectedServerProof:
+            del client.Auth
             raise AuthError("Invalid server authentication")
 
         # Login success
         if not unlock:
-            returnValue(resp)
+            return_value(resp)
 
         # And unlock
         unlocked = yield self._unlock(password)
-        returnValue((resp, unlocked))
+        return_value((resp, unlocked))
 
     def unlock(self, password, timeout=None):
         """ Unlock to Protonmail """
         if not self.client.blocking:
             return self._unlock(password)
-        return crochet.run_in_reactor(
-            lambda: self._unlock(password))().wait(timeout)
+        return run_sync(self._unlock, password, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _unlock(self, password):
         client = self.client
         host = self.host
@@ -674,17 +717,20 @@ class API(Model):
         # Decode the access token
         token = auth.check_mailbox_password(client.Auth.EncPrivateKey,
                                             pwd, client.Auth.AccessToken)
-
+        
+        # Stupid python 3
+        authorization = 'Bearer ' + utils.str(token)
+        
         headers.update({
             'Accept': '*/*',
-            'Authorization': 'Bearer ' + token,
+            'Authorization': authorization,
             'Referer': host + "login/unlock",
             'x-pm-uid': client.Auth.Uid
         })
 
         # Get the cookies
-        r = yield treq.post(
-            host + "api/auth/cookies",
+        r = yield requests.post(
+            url=host + "api/auth/cookies",
             json=client.to_json(
                 'ResponseType', 'ClientID', 'GrantType', 'RedirectURI',
                 'State', Uid=client.Auth.Uid,
@@ -693,7 +739,7 @@ class API(Model):
             headers=headers
         )
 
-        if r.code != http.OK:
+        if r.code != 200:
             raise LoginError("Unexpected unlock response: "
                              "{}".format(r.code))
 
@@ -705,15 +751,15 @@ class API(Model):
         result = client.AuthCookies = AuthCookiesResponse.from_json(**data)
         if result.Code == 1000:
             client.Cookies = r.cookies()
-        returnValue(result)
+        return_value(result)
 
     def logout(self, timeout=None):
         """ Logout of Protonmail """
         if not self.client.blocking:
             return self._logout()
-        return crochet.run_in_reactor(self._logout)().wait(timeout)
+        return run_sync(self._logout, timeout=timeout)
 
-    @inlineCallbacks
+    @coroutine
     def _logout(self):
         client = self.client
         data = yield self.request("api/auth", method='DELETE', blocking=False)
@@ -724,7 +770,7 @@ class API(Model):
         del client.Auth
         del client.AuthCookies
         del client.MailboxPassword
-        returnValue(result)
+        return_value(result)
 
     def request(self, path, body=None, method='GET', cookies=None,
                 headers=None, response=None, timeout=None, blocking=None,
@@ -759,10 +805,10 @@ class API(Model):
             return self._request(path, body, method, cookies, headers,
                                  response, **kwargs)
         if blocking:
-            return crochet.run_in_reactor(request)().wait(timeout)
+            return run_sync(request, timeout=timeout)
         return request()
 
-    @inlineCallbacks
+    @coroutine
     def _request(self, path, body=None, method='GET', cookies=None,
                  headers=None, response=None, **kwargs):
         client = self.client
@@ -783,20 +829,20 @@ class API(Model):
                         "headers={} kwargs={}".format(
                             method, url, body, cookies, headers, 
                             pformat(kwargs)))
-        r = yield treq.request(method,
-                               url,
-                               body=body,
-                               cookies=cookies or client.Cookies,
-                               headers=headers or h,
-                               **kwargs)
-        #if r.code != http.OK:
-        #    raise HttpError("Unexpected HTTP response: {}".format(r.code))
+        r = yield requests.request(method=method,
+                                   url=url,
+                                   body=body,
+                                   cookies=cookies or client.Cookies,
+                                   headers=headers or h,
+                                   **kwargs)
+        if r.code != 200:
+            log.warning("Unexpected HTTP response: {}".format(r.code))
         data = yield r.json()
         if client.debug:
             log.warning("Response: {} - {}".format(r, pformat(data)))
         if response is not None:
-            returnValue(response.from_json(**data))
-        returnValue(data)
+            return_value(response.from_json(**data))
+        return_value(data)
 
     def __getattr__(self, item):
         """ Return an alias so you can do requests using the dot notation.
@@ -817,7 +863,8 @@ class API(Model):
         
         """
         parts = (self.path + [path]) if path else self.path
-        return self.request("/".join(parts), **kwargs)
+        url = utils.join("/", parts)
+        return self.request(url, **kwargs)
 
     def __repr__(self):
         cls = self.__class__

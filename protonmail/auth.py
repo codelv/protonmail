@@ -8,6 +8,7 @@ The full license is in the file LICENSE, distributed with this software.
 Created on May, 2018
 """
 import os
+import sys
 import pgpy
 import random
 import bcrypt
@@ -21,6 +22,9 @@ from cryptography.hazmat.primitives.ciphers import (
 from pgpy import PGPMessage, PGPKey
 from pgpy.constants import SymmetricKeyAlgorithm
 from pgpy.packet import PKESessionKeyV3
+
+
+IS_PY3 = sys.version_info.major > 2
 
 
 def read_armored(message):
@@ -38,7 +42,7 @@ def read_armored(message):
 
     """
     # It's is not a valid OpenPGP message so screw it it
-    return message.strip().split("\n")[3]
+    return message.strip().split(b"\n")[3]
 
 
 def bcrypt_encode_base64(salt, n=16):
@@ -70,6 +74,8 @@ def hash_password(auth_version, password, salt, username, modulus):
         Hashed password
 
     """
+    if IS_PY3 and not isinstance(password, bytes):
+        password = password.encode()
     if auth_version in (3, 4):
         bsalt = bytes(salt) + b'proton'
         key = bcrypt.hashpw(password, b'$2y$10$'+bcrypt_encode_base64(bsalt))
@@ -91,6 +97,8 @@ def compute_key_password(password, salt):
     hashed: String
 
     """
+    if IS_PY3 and not isinstance(password, bytes):
+        password = password.encode()
     return bcrypt.hashpw(password, b'$2y$10$'+bcrypt_encode_base64(salt))[29:]
 
 
@@ -117,6 +125,8 @@ def check_mailbox_password(key, password, access_token):
         raise ValueError("Missing access token")
     msg = PGPMessage.from_blob(access_token)
     pk, _ = PGPKey.from_blob(key)
+    if IS_PY3 and isinstance(password, bytes):
+        password = password.decode()
     with pk.unlock(password) as uk:
         return bytes(uk.decrypt(msg).message)
 
@@ -186,7 +196,7 @@ def from_bn(i, n=2048/8):
     
     """
     return bytes(bytearray([(i & (0xff << pos*8)) >> pos*8
-                            for pos in range(n)]))
+                            for pos in range(int(n))]))
 
 
 def mod_reduce(a, b):
@@ -198,7 +208,7 @@ def mod_reduce(a, b):
 
 def generate_random_bytes(n):
     """ Pulled out for testing purposes """
-    return os.urandom(n)
+    return os.urandom(int(n))
 
 
 def generate_random_string(n):

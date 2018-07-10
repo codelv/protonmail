@@ -7,13 +7,16 @@ The full license is in the file LICENSE, distributed with this software.
 
 Created on May, 2018
 """
+import sys
 from base64 import b64encode as b64e
-from protonmail import auth
+from protonmail import auth, utils
 from pgpy import PGPMessage
 from atom.api import (
     Atom, Str, Int, Range, Bool, List, Dict, Instance, ForwardInstance
 )
 from atom.dict import _DictProxy
+
+IS_PY3 = utils.IS_PY3
 
 
 class BInt(Range):
@@ -22,6 +25,9 @@ class BInt(Range):
 
 
 class Model(Atom):
+    #: Extra keys that don't fit
+    _keys = Dict()
+
     def to_json(self, *keys, **extra):
 
         def unpack(v):
@@ -31,6 +37,8 @@ class Model(Atom):
                 return [unpack(it) for it in v]
             elif isinstance(v, (dict, _DictProxy)):
                 return {unpack(k): unpack(v[k]) for k in v}
+            elif IS_PY3 and isinstance(v, bytes):
+                return v.decode()
             return v
         if keys:
             state = {}
@@ -40,14 +48,19 @@ class Model(Atom):
             state = self.__getstate__()
             for k, v in state.items():
                 state[k] = unpack(getattr(self, k))
-        state.update(extra)
+        for k, v in extra.items():
+            state[k] = unpack(v)
         return state
 
     @classmethod
     def from_json(cls, **data):
         state = data.copy()
+        state['_keys'] = {}
         for k, v in data.items():
-            m = getattr(cls, k)
+            m = getattr(cls, k, None)
+            if m is None:
+                state['_keys'][k] = state.pop(k)
+                continue
             #print(k, m)re
             if isinstance(m, Instance):
                 mcls = m.validate_mode[-1]
@@ -228,11 +241,14 @@ class User(UserSettings, MailSettings):
     Keys = List(Key)
     PublicKey = Str()
     EncPrivateKey = Str()
+    U2FKeys = List(str)
+    TOTP = Int()
 
 
 class EmailAddress(Model):
     Address = Str()
     Name = Str()
+    Group = Str()
 
 
 # class ParsedHeaders(Model):

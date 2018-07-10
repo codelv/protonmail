@@ -7,7 +7,7 @@ The full license is in the file LICENSE, distributed with this software.
 
 Created on May, 2018
 """
-from atom.api import Str, Int, Dict, List, Instance
+from atom.api import Str, Bytes, Int, Dict, List, Instance
 from protonmail.models import (
     Model, BInt, User, UserSettings, MailSettings, Message, Conversation,
     Contact, Notice, UnreadCount, Label, Location
@@ -25,12 +25,14 @@ class Response(Model):
 
 class AuthInfoResponse(Response):
     """ Expected response from api/auth/info """
-    Modulus = Str()
-    ServerEphemeral = Str()
+    
+    Modulus = Bytes()
+    ServerEphemeral = Bytes()
     Version = Int()
-    Salt = Str()
+    Salt = Bytes()
     SRPSession = Str()
     TwoFactor = BInt()
+    
 
 
 class AuthResponse(Response):
@@ -45,8 +47,8 @@ class AuthResponse(Response):
     ServerProof = Str()
     PasswordMode = Int()
     PrivateKey = Str()
-    EncPrivateKey = Str()
-    KeySalt = Str()
+    EncPrivateKey = Bytes()
+    KeySalt = Bytes()
     TokenType = Str()
 
 
