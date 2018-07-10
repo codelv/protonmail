@@ -8,7 +8,6 @@ The full license is in the file LICENSE, distributed with this software.
 Created on May, 2018
 """
 import treq
-import crochet
 from functools import wraps
 from twisted.internet.defer import inlineCallbacks, returnValue
 
@@ -21,6 +20,7 @@ return_value = returnValue
 
 #: Use crochet to run sync
 def run_sync(f, *args, **kwargs):
+    import crochet
     timeout = kwargs.pop('timeout')
     
     @wraps(f)

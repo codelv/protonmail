@@ -8,8 +8,6 @@ The full license is in the file LICENSE, distributed with this software.
 Created on May, 2018
 """
 import sys
-import logging
-from pprint import pformat
 from atom.api import Atom, Instance
 from tornado.gen import coroutine
 from tornado.gen import Return
@@ -27,9 +25,6 @@ if sys.version_info.major > 2:
     from http.cookies import SimpleCookie
 else:
     from Cookie import SimpleCookie
-
-
-log = logging.getLogger('protonmail')
 
 
 def return_value(value):
@@ -57,9 +52,7 @@ class Response(Atom):
     
     @coroutine
     def json(self):
-        log.debug("Response: {}".format(self.response))
         r = json.loads(self.response.body)
-        log.debug("Json: {}".format(pformat(r)))
         return_value(r)
         
     
@@ -89,13 +82,12 @@ class Requests(Atom):
         if cookies:
             headers['Cookie'] = ";".join(["=".join(c) for c in cookies.items()])
         kwargs['headers'] = headers
-        log.debug("Request: {}".format(pformat(kwargs)))
         request = HTTPRequest(**kwargs)
         try:
             r = yield client.fetch(request)
         except HTTPError as e:
             r = e.response or e
         return_value(Response(response=r))
-        
+
 
 requests = Requests()

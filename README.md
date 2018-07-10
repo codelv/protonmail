@@ -1,8 +1,9 @@
 # Protonmail
 
-A protonmail client in python using treq, atom, bcrypt, and pgpy. 
+An unoffical protonmail client for python using pgpy, bcrypt, and atom. 
 
-It can be used sync or async thanks to crochet.
+It can be used sync or async and currently supports twisted and tornado for
+python 2.7 and up.
 
 
 ## Usage
@@ -101,6 +102,8 @@ if r.Code != 1000:
     print(r.Error)
 
 ```
+
+There's also a shortcut `client.send_simple` which does eveything above.
 
 Once done be sure to logout. 
 
