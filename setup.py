@@ -12,15 +12,15 @@ from setuptools import setup, find_packages
 
 setup(
     name='protonmail',
-    version='0.1.0',
+    version='0.1.1',
     author='frmdstryr',
     author_email='frmdstryr@gmail.com',
-    url='https://gitlab.com/frmdstryr/protonmail',
-    description='A python client for protonmail',
+    url='https://gitlab.com/codelv/protonmail',
+    description='An unofficial python client for protonmail',
     license="BSD",
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',
     install_requires=['pgpy', 'bcrypt', 'atom'],
-    #also needs either ['treq', 'crochet'], or ['tornado'] or ['aiohttp']
+    # also needs either ['treq'], or ['tornado'] or ['aiohttp']
     packages=find_packages(),
 )
