@@ -1,12 +1,12 @@
 # Protonmail
 
-An _unoffical_ protonmail client for python using pgpy, bcrypt, and atom. 
+An _unofficial_ protonmail client for python using pgpy, bcrypt, and atom. 
 
 It can be used sync or async and currently supports twisted and tornado for
 python 2.7 and up.
 
-Currently supports reading and sending messages to protonmail users and outside
-users. Sending and receving attachments are not yet supported.
+Currently it supports reading and sending messages to protonmail users and 
+outside users. Sending and receving attachments are not yet supported.
 
 
 ## Usage
@@ -117,7 +117,9 @@ c.api.logout()
 ```
 
 
-### Comments
+### Comments & License
+
+License is now GPL. For alternate licencing contact me (guess my email).
 
 This was written based on the web client. Please audit the code and report bugs.
 

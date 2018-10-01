@@ -1,7 +1,7 @@
 """
 Copyright (c) 2018, Jairus Martin.
 
-Distributed under the terms of the BSD License.
+Distributed under the terms of the GPL License.
 
 The full license is in the file LICENSE, distributed with this software.
 
