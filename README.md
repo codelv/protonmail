@@ -119,7 +119,7 @@ c.api.logout()
 
 ### Comments & License
 
-License is now GPL. For alternate licencing contact me (guess my email).
+License is now GPL. For alternate licensing contact me (guess my email).
 
 This was written based on the web client. Please audit the code and report bugs.
 
