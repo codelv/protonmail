@@ -18,7 +18,7 @@ from getpass import getpass
 from protonmail.client import Client
 
 # Login
-client = Client(username="someuser", 
+client = Client(Username="someuser", 
                 blocking=True)  # It's async by default
 
 # If using different keys for login and mailbox you must unlock separately                
