@@ -359,7 +359,7 @@ def decrypt_session_key(blob, key=None, password=None):
     """
     message = PGPMessage.from_blob(blob)
     for sk in message._sessionkeys:
-        k = key._children.get(sk.encrypter)
+        k = key.subkeys.get(sk.encrypter)
         if k is not None:
             cipher, session_key = sk.decrypt_sk(k._key)
             return cipher, bytes(session_key)
