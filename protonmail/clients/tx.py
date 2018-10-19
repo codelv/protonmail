@@ -21,7 +21,7 @@ return_value = returnValue
 #: Use crochet to run sync
 def run_sync(f, *args, **kwargs):
     import crochet
-    timeout = kwargs.pop('timeout')
+    timeout = kwargs.pop('timeout', None)
     
     @wraps(f)
     def wrapped():
