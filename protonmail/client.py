@@ -17,14 +17,9 @@ from pgpy import PGPMessage, PGPKey
 from pgpy.constants import SymmetricKeyAlgorithm
 from protonmail.clients.api import coroutine, return_value, run_sync, requests
 from protonmail.models import (
-    Model, User, UserSettings, TwoFactorCode, Message, EmailAddress
+    Model, User, UserSettings, TwoFactorCode, Message, EmailAddress, Address
 )
-from protonmail import auth, utils
-from protonmail.responses import (
-    Response, AuthInfoResponse, AuthCookiesResponse, AuthResponse,
-    UsersPubKeyResponse, MessageResponse, UsersResponse, MessageSendResponse
-)
-
+from protonmail import auth, utils, responses
 
 if utils.IS_PY3:
     from http.cookiejar import CookieJar
@@ -82,7 +77,7 @@ class Client(Model):
     # =========================================================================
     # Parameters for api/auth/info
     # =========================================================================
-    AppVersion = Str('Web_3.13.7')
+    AppVersion = Str('Web_3.14.21')
     ApiVersion = Str('3')
 
     #: Username
@@ -95,7 +90,7 @@ class Client(Model):
     ClientSecret = Str("4957cc9a2e0a2a49d02475c9d013478d")
 
     #: Auth info from login
-    AuthInfo = Instance(AuthInfoResponse)
+    AuthInfo = Instance(responses.AuthInfoResponse)
 
     # =========================================================================
     # Parameters for api/auth/
@@ -135,7 +130,7 @@ class Client(Model):
     ExpectedServerProof = Bytes()
 
     #: Auth response from login
-    Auth = Instance(AuthResponse)
+    Auth = Instance(responses.AuthResponse)
 
     #: Code for api/auth
     TwoFactorCode = Instance(TwoFactorCode)
@@ -163,7 +158,7 @@ class Client(Model):
     State = Str()
 
     #: Result from the cookies request
-    AuthCookies = Instance(AuthCookiesResponse)
+    AuthCookies = Instance(responses.AuthCookiesResponse)
 
     #: Cookies set
     Cookies = Instance((CookieJar, SimpleCookie))
@@ -179,6 +174,11 @@ class Client(Model):
     # =========================================================================
     #: User info
     User = Instance(User)
+    
+    # =========================================================================
+    # Results from api/addresses/
+    # =========================================================================
+    Addresses = List(Address)
 
     # =========================================================================
     # Results for api/settings/
@@ -212,13 +212,13 @@ class Client(Model):
             del self.PrivateKey
             self.is_logged_in = False
 
-    def get_public_keys(self, emails, timeout=None):
-        """ Get the public keys for the given list of emails
+    def get_public_key(self, email, timeout=None):
+        """ Get the public keys for the given email
         
         Parameters
         ----------
-        emails: List or String
-            Emails to retrieve
+        emails: String
+            Email to retrieve
         timeout: Int or Float
             Time to wait when blocking
             
@@ -227,25 +227,43 @@ class Client(Model):
         result: Dict
         """
         if not self.blocking:
-            return self._get_public_keys(emails)
-        return run_sync(self._get_public_keys, emails, timeout=timeout)
+            return self._get_public_key(email)
+        return run_sync(self._get_public_key, email, timeout=timeout)
 
     @coroutine
-    def _get_public_keys(self, emails):
-        if isinstance(emails, (tuple, list)):
-            emails = utils.join(",", emails)
-        else:
-            emails = utils.str(emails)
-        if utils.IS_PY3:
-            emails = emails.encode()
-        r = yield self.api.users.pubkeys(b64e(emails),
-                                         blocking=False,
-                                         response=UsersPubKeyResponse)
-
-        self.PublicKeys.update({u: PGPKey.from_blob(k)[0] if k else ''
-                                for u, k in r.Keys.items()})
+    def _get_public_key(self, email):
+        email = utils.str(email)
+        r = yield self.api.keys('?Email={}'.format(email),
+                                blocking=False,
+                                response=responses.KeysResponse)
+        self.PublicKeys[email] = [PGPKey.from_blob(k.PublicKey)[0] 
+                                  for k in r.Keys]
         return_value(r)
+        
+    def get_addresses(self, timeout=None):
+        """ Get addresses this User has
+        
+        Parameters
+        ----------
+        timeout: Int or Float
+            Time to wait when blocking
+            
+        Returns
+        --------
+        result: User
+        """
+        if not self.blocking:
+            return self._get_addresses()
+        return run_sync(self._get_addresses, timeout=timeout)
 
+    @coroutine
+    def _get_addresses(self):
+        r = yield self.api.addresses(blocking=False,
+                                     response=responses.AddressesResponse)
+        if r.Code == 1000:
+            self.Addresses = r.Addresses
+        return_value(r)
+        
     def get_user_info(self, timeout=None):
         """ Get the info aboute this User
         
@@ -264,7 +282,8 @@ class Client(Model):
 
     @coroutine
     def _get_user_info(self):
-        r = yield self.api.users(blocking=False, response=UsersResponse)
+        r = yield self.api.users(blocking=False,
+                                 response=responses.UsersResponse)
         if r.Code == 1000:
             self.User = r.User
         return_value(r)
@@ -294,7 +313,7 @@ class Client(Model):
         if not message.Body:
             resp = yield self.api.messages(message.ID,
                                            blocking=False,
-                                           response=MessageResponse)
+                                           response=responses.MessageResponse)
             if resp.Code != 1000:
                 raise ValueError("Unexpected response: {}".format(
                                  resp.to_json()))
@@ -305,23 +324,27 @@ class Client(Model):
         if msg.is_signed:
             email = message.SenderAddress
             if email not in self.PublicKeys:
-                yield self._get_public_keys([email])
+                yield self._get_public_key(email)
             pk = self.PublicKeys.get(email)
             if not pk:
                 raise SecurityError("Failed to verify signed message!")
-            pk.verify(msg)
+            pk[0].verify(msg) # TODO: Support mutiple keys
 
         # Decrypt
         with self.PrivateKey.unlock(self.MailboxPassword) as key:
             message.decrypt(key)
         return_value(message)
 
-    def create_draft(self, timeout=None):
+    def create_draft(self, address=None, message=None, timeout=None):
         """ Create a message as a draft. This will populate an ID for 
         the message.
  
         Parameters
         ----------
+        address: protonmail.models.Address or None
+            Address to send with, if None, the default will be used
+        message: protonmail.models.Message or None
+            Message to create a draft for, if None, one will be created
         timeout: Int or Float
             Timeout to wait when blocking
          
@@ -330,27 +353,41 @@ class Client(Model):
         result: protonmail.responses.MessageResponse
         """
         if not self.blocking:
-            return self._create_draft()
-        return run_sync(self._create_draft, timeout=timeout)
+            return self._create_draft(address, message)
+        return run_sync(self._create_draft, address, message, timeout=timeout)
 
     @coroutine
-    def _create_draft(self):
-        user = self.User
-        if not user:
-            r = yield self._get_user_info()
-            user = r.User
-        address = user.Addresses[0]
-        message = Message(
-            AddressID=address.ID,
-            IsRead=1,
-            MIMEType='text/html',
-            Sender=EmailAddress(Name=address.DisplayName,
-                                Address=address.Email)
-        )
+    def _create_draft(self, address=None, message=None):
+        if message is None:
+            # Create a new message
+            user = self.User
+            if not user:
+                r = yield self._get_user_info()
+                user = self.User
+            
+            if not address:
+                addresses = self.Addresses
+                if not addresses:
+                    r = yield self._get_addresses()
+                    addresses = self.Addresses
+                if not addresses:
+                    raise ValueError("No email addresses available")
+                address = addresses[0]
+            
+            name = (address.DisplayName or address.Name or
+                    user.DisplayName or user.Name)
+            message = Message(
+                AddressID=address.ID,
+                IsRead=1,
+                MIMEType='text/html',
+                Sender=EmailAddress(Name=name, Address=address.Email)
+            )
+        
+        # Make sure it's encrypted
         message.encrypt(self.PrivateKey.pubkey)
 
-        r = yield self.api.messages.draft(
-            method='POST', blocking=False, response=MessageResponse,
+        r = yield self.api.messages(
+            method='POST', blocking=False, response=responses.MessageResponse,
             json={
                 'AttachmentKeyPackets': [],
                 'id': None,
@@ -393,8 +430,9 @@ class Client(Model):
         if not message.is_encrypted():
             raise SecurityError("Failed to encrypted draft")
 
-        r = yield self.api.messages.draft(
-            message.ID, method='PUT', blocking=False, response=MessageResponse,
+        r = yield self.api.messages(
+            message.ID, method='PUT', blocking=False, 
+            response=responses.MessageResponse,
             json={
                 'AttachmentKeyPackets': {},
                 'id': message.ID,
@@ -432,7 +470,7 @@ class Client(Model):
         # Read draft from server if needed
         if message.ID and not message.Body:
             r = yield self.api.messages(message.ID, blocking=False,
-                                        response=MessageResponse())
+                                        response=responses.MessageResponse)
             message = r.Message
         
         # Decrypt
@@ -443,10 +481,10 @@ class Client(Model):
         keys = self.PublicKeys
         emails = list(set([to.Address for to in (
                            message.ToList + message.CCList + message.BCCList)]))
-        keys_needed = [e for e in emails if e not in keys]
-        if keys_needed:
-            yield self._get_public_keys(keys_needed)
-            keys = self.PublicKeys
+        for e in emails: 
+            if e not in keys:
+                yield self._get_public_key(e)
+        keys = self.PublicKeys
         
         # Extract the session key
         #cipher = SymmetricKeyAlgorithm.AES256
@@ -477,7 +515,8 @@ class Client(Model):
                 #                         sessionkey=session_key)
                 
                 # Encrypt the session key for this user
-                sk = auth.encrypt_session_key(session_key, key=pk,
+                # TODO: Support multiple keys
+                sk = auth.encrypt_session_key(session_key, key=pk[0],
                                               cipher=cipher)
                 
                 pkg['Addresses'][to.Address] = {
@@ -519,7 +558,10 @@ class Client(Model):
         
         # Sending to a non PM user screws all security
         if cleartext:
-            pkg['BodyKey'] = utils.str(b64e(session_key))
+            pkg['BodyKey'] = {
+                'Algorithm': cipher.name.lower(),
+                'Key': utils.str(b64e(session_key))
+            }
             pkg['AttachmentKeys'] = {}  # TODO
         
         # Get the message
@@ -535,9 +577,9 @@ class Client(Model):
         # Now encode it
         pkg['Body'] = utils.str(b64e(msg.message.__bytes__()))
     
-        r = yield self.api.messages.send(
+        r = yield self.api.messages(
             message.ID, method='POST', blocking=False,
-            response=MessageSendResponse,
+            response=responses.MessageSendResponse,
             json={
                 'ExpirationTime': 0,
                 'id': message.ID,
@@ -641,16 +683,21 @@ class API(Model):
         # Get the auth info
         r = yield requests.post(
             url=host+"api/auth/info",
-            json=client.to_json('Username', 'ClientID', 'ClientSecret'),
+            json=client.to_json('Username', 'ClientID'),
             headers=headers
         )
-
+        
         if r.code != 200:
-            raise LoginError("Unexpected info response: {}".format(r.code))
+            try:
+                data = yield r.json()
+            except:
+                data = {}
+            raise LoginError("Unexpected info response: "
+                             "{} - {}".format(r.code, data))
         data = yield r.json()
 
         # Parses the response and computes the proof
-        resp = client.AuthInfo = AuthInfoResponse.from_json(**data)
+        resp = client.AuthInfo = responses.AuthInfoResponse.from_json(**data)
         if resp.Code != 1000:
             raise LoginError("Unexpected info code: {}".format(resp.Code))
         if resp.TwoFactor:
@@ -678,11 +725,16 @@ class API(Model):
             headers=headers
         )
         if r.code != 200:
-            raise LoginError("Unexpected auth response: {}".format(r.code))
+            try:
+                data = yield r.json()
+            except:
+                data = {}
+            raise LoginError("Unexpected auth response: "
+                             "{} - {}".format(r.code, data))
 
         data = yield r.json()
 
-        resp = client.Auth = AuthResponse.from_json(**data)
+        resp = client.Auth = responses.AuthResponse.from_json(**data)
         if resp.Code != 1000:
             del client.Auth
             raise LoginError("Unexpected auth code: {}".format(resp.Code))
@@ -748,8 +800,9 @@ class API(Model):
         # Save the hashed mailbox password
         client.MailboxPassword = pwd
 
-        result = client.AuthCookies = AuthCookiesResponse.from_json(**data)
+        result = responses.AuthCookiesResponse.from_json(**data)
         if result.Code == 1000:
+            client.AuthCookies = result
             client.Cookies = r.cookies()
         return_value(result)
 
@@ -763,7 +816,7 @@ class API(Model):
     def _logout(self):
         client = self.client
         data = yield self.request("api/auth", method='DELETE', blocking=False)
-        result = Response.from_json(**data)
+        result = responses.Response.from_json(**data)
         if result.Code != 1000:
             raise LoginError("Unexpected logout code: {}".format(result.Code))
         del client.AuthInfo
@@ -817,7 +870,8 @@ class API(Model):
             raise LoginError("Must login first!")
         if not client.AuthCookies:
             raise AuthError("Must unlock the keys first!")
-        if response is not None and not issubclass(response, Response):
+        if response is not None and not issubclass(response, 
+                                                   responses.Response):
             raise ValueError("response must be a subclass Response. "
                              "Got {}".format(response))
         h = self.headers.copy()
@@ -862,8 +916,11 @@ class API(Model):
         - client.api.conversations('convo-id-string...==')
         
         """
-        parts = (self.path + [path]) if path else self.path
-        url = utils.join("/", parts)
+        url = utils.join("/", self.path)
+        if path.startswith("?"):
+             url += path
+        elif path:
+            url += "/" + path
         return self.request(url, **kwargs)
 
     def __repr__(self):

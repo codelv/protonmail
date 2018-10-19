@@ -12,7 +12,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='protonmail',
-    version='0.1.2',
+    version='0.1.3',
     author='frmdstryr',
     author_email='frmdstryr@gmail.com',
     url='https://gitlab.com/codelv/protonmail',

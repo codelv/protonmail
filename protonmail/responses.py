@@ -10,7 +10,7 @@ Created on May, 2018
 from atom.api import Str, Bytes, Int, Dict, List, Instance
 from protonmail.models import (
     Model, BInt, User, UserSettings, MailSettings, Message, Conversation,
-    Contact, Notice, UnreadCount, Label, Location
+    Contact, Notice, UnreadCount, Label, Location, Key, Address
 )
 
 
@@ -63,6 +63,11 @@ class UsersResponse(Response):
     User = Instance(User)
 
 
+class AddressesResponse(Response):
+    """ Expected response from api/addresses """
+    Addresses = List(Address)
+
+
 class SettingsResponse(Response):
     """ Expected response from api/settings """
     UserSettings = Instance(UserSettings)
@@ -92,17 +97,10 @@ class MessageSendResponse(Response):
     Sent = Instance(Message)
 
 
-class UsersPubKeyResponse(Response):
-    """ Expected response from api/users/pubkey/<user> 
-    Returns the code and the email of each user """
-    Keys = Dict()
-
-    @classmethod
-    def from_json(cls, **data):
-        return UsersPubKeyResponse(**data)
-
-    def __init__(self, Code, **kwargs):
-        super(UsersPubKeyResponse, self).__init__(Code=Code, Keys=kwargs)
+class KeysResponse(Response):
+    """ Expected response from api/keys """
+    Keys = List(Key)
+    RecipientType = Int()
 
 
 class EventsResult(Model):
